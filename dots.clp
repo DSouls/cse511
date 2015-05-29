@@ -1,6 +1,4 @@
 ; TODOS
-;	point system (some points aren't being awarded {probably salience})
-;	gridlock awareness
 ;	post-gridlock logic
 ;	pre-gridlock logic
 
@@ -9,12 +7,13 @@
 ;
 
 (defglobal
-	?*num-rows* = 0
-	?*num-columns* = 0
-	?*num-lines* = 0
-	?*num-moves* = 0
-	?*player-score* = 0
-	?*opponent-score* = 0
+	?*num-rows* = 0             ;Number of rows in the game defined as boxes
+	?*num-columns* = 0          ;Number of columns in the game defined as boxes
+	?*num-lines* = 0            ;Total number of lines used to make up the playfield
+	?*num-moves* = 0            ;Current number of moves taken by players
+	?*player-score* = 0         ;Number of boxes completed by this program
+	?*opponent-score* = 0       ;Number of boxes completed by the opponent from input
+	?*num-opponent-moves* = 0   ;Ensures at least one move is made by the opponent
 )
 
 (deftemplate line-data "Keeps track of which lines are marked"
@@ -24,6 +23,7 @@
 
 (deftemplate box-data "Keeps track of the completion state of boxes"
 	(multislot open-sides (type INTEGER) (range 1 ?VARIABLE))
+	(slot point-value (type INTEGER))
 )
 
 (deftemplate active-player "Monitors who the active player is"
@@ -69,7 +69,7 @@
 			(bind ?side2 (+ ?horizontal-moves ?j (* (- ?i 1) (+ ?*num-columns* 1)) 1))
 			(bind ?side3 (+ ?side1 ?*num-columns*))
 			(bind ?side4 (- ?side2 1))
-			(assert (box-data (open-sides ?side1 ?side2 ?side3 ?side4)))
+			(assert (box-data (open-sides ?side1 ?side2 ?side3 ?side4) (point-value 1)))
 		)
 	)
 	(retract ?initialize-fact)
@@ -104,8 +104,16 @@
 	)
 )
 
+(defrule gridlock-awareness "Checks for gridlock to change logic"
+	(forall
+		(box-data (open-sides $?lines))
+		(test (eq (length $?lines) 2))
+	)
+=>
+	(assert (gridlock))
+)	
+
 (defrule game-over "Quits the program"
-	(declare (salience 1))
 	(active-player)
 	(not (exists (line-data (marked no))))
 =>
@@ -125,25 +133,48 @@
 	(halt)
 )
 
-(defrule modify-boxes "Removes line from relevant box data"
+(defrule modify-boxes "Removes line from relevant box data or increases points for a domino"
 	(draw-line ?line)
-	?old-box-status <- (box-data (open-sides $?lines-before ?line $?lines-after))
+	?old-box-status <- (box-data (open-sides $?lines-before ?line $?lines-after) (point-value ?points))
 	?active-player-fact <- (active-player)
 =>
-	(if (and (eq (length $?lines-before) 0) (eq (length $?lines-after) 0))
+	(if (not (duplicate ?old-box-status (open-sides $?lines-before $?lines-after)))
 	 then
-		(if (eq (fact-slot-value ?active-player-fact who) player)
-		 then
-			(bind ?*player-score* (+ ?*player-score* 1))
-			(printout t "Player score is now " ?*player-score* crlf)
-		 else
-			(bind ?*opponent-score* (+ ?*opponent-score* 1))
-			(printout t "Opponent score is now " ?*opponent-score* crlf)
-		)
+		(assert (domino-exists))
 	 else
-		(duplicate ?old-box-status (open-sides $?lines-before $?lines-after))
+	 	(retract ?old-box-status)
+		(if (and (eq (length $?lines-before) 0) (eq (length $?lines-after) 0))
+		 then
+			(assert (add-points))
+		)
 	)
-	(retract ?old-box-status)
+)
+
+(defrule increase-box-points "Increase point values for a double cross move"
+	?domino-exists-fact <- (domino-exists)
+	(draw-line ?line)
+	?domino-half-1 <- (box-data (open-sides $?lines-before ?line $?lines-after))
+	?domino-half-2 <- (box-data (open-sides $?lines-before $?lines-after))
+=>
+	(modify ?domino-half-2 (point-value 2))
+	(retract ?domino-half-1)
+	(retract ?domino-exists-fact)
+)
+
+(defrule add-points "Assigns points to players for completed boxes"
+	?add-points-fact <- (add-points)
+	?completed-box <- (box-data (open-sides $?lines) (point-value ?points))
+	(test (eq (length $?lines) 0))
+	?active-player-fact <- (active-player)
+=>
+	(if (eq (fact-slot-value ?active-player-fact who) player)
+	 then
+		(bind ?*player-score* (+ ?*player-score* ?points))
+	 else
+		(bind ?*opponent-score* (+ ?*opponent-score* ?points))
+	)
+	(retract ?add-points-fact)
+	(retract ?completed-box)
 )
 
 (defrule mark-line "Marks lines used in moves for record keeping"
@@ -167,19 +198,44 @@
 	(assert (get-move))
 )
 
-(defrule get-move "Gets moves made by opponent"
+(defrule get-move "Gets moves made by opponent, ensuring at least one"
 	?get-move-fact <- (get-move)
 =>
 	(bind ?move (read))
-	(if (neq ?move done)
+	(if (eq ?move done)
 	 then
+		(assert (check-moves))
+	 else
 		(assert (opponent-move ?move))
 	)
 	(retract ?get-move-fact)
 )
 
+(defrule num-moves-check "Check to make sure at least one valid move has been made"
+	?check-moves-fact <- (check-moves)
+=>
+	(if (= 0 ?*num-opponent-moves*)
+	 then
+		(printout t "Please enter at least one valid move." crlf)
+		(assert (get-move))
+	 else
+		(bind ?*num-opponent-moves* 0)
+	)
+	(retract ?check-moves-fact)
+)
+
+(defrule opponent-input-validation "Ensures the opponent input is not a miscellaneous string"
+	?move-fact <- (opponent-move ?move)
+	(test (not (integerp ?move)))
+=>
+	(printout t "Invalid input. Please try again." crlf)
+	(retract ?move-fact)
+	(assert (get-move))
+)
+
 (defrule invalid-opponent-move "Move is not within the correct range"
 	?move-fact <- (opponent-move ?line)
+	(test (integerp ?line))
 	(test (not (and (> ?line 0) (<= ?line ?*num-lines*))))
 =>
 	(printout t "Line number out of range. Please try again." crlf)
@@ -198,14 +254,15 @@
 	?check-line-fact <- (check-line ?line)
 	(line-data (number ?line) (marked ?mark))
 =>
+	(assert (get-move))
 	(if (eq ?mark yes)
 	 then
 		(printout t ?line " is already marked. Re-enter or ignore if unintended." crlf)
 	 else
 		(assert (draw-line ?line))
+		(bind ?*num-opponent-moves* (+ ?*num-opponent-moves* 1))
 	)
 	(retract ?check-line-fact)
-	(assert (get-move))
 )
 
 ;
